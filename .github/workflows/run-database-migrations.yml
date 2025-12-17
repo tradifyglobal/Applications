@@ -119,12 +119,12 @@ jobs:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          cat > ~/.ssh/id_rsa << 'EOF'
-          ${{ env.SSH_PRIVATE_KEY }}
-          EOF
+          printf "%s" "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
           echo "✅ SSH configured"
+        env:
+          SSH_PRIVATE_KEY: ${{ env.SSH_PRIVATE_KEY }}
       
       - name: Test SSH Connection
         run: |
@@ -226,11 +226,11 @@ jobs:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          cat > ~/.ssh/id_rsa << 'EOF'
-          ${{ secrets.DEV_SSH_PRIVATE_KEY }}
-          EOF
+          printf "%s" "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.DEV_APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
       
       - name: Generate Report
         run: |

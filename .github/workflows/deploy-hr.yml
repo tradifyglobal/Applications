@@ -104,11 +104,11 @@ jobs:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          cat > ~/.ssh/id_rsa << 'EOF'
-          ${{ env.SSH_PRIVATE_KEY }}
-          EOF
+          printf "%s" "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts
+        env:
+          SSH_PRIVATE_KEY: ${{ env.SSH_PRIVATE_KEY }}
       
       - name: Deploy to App Server
         run: |
