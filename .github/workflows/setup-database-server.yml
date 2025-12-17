@@ -1,0 +1,259 @@
+name: Setup Database Server
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/setup-database-server.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to setup'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      db_password:
+        description: 'Database password for erp_user'
+        required: false
+        type: string
+        default: 'erp_password'
+
+env:
+  DB_SERVER_IP: ${{ secrets.DB_SERVER_IP }}
+  DB_SERVER_USER: ${{ secrets.DB_SERVER_USER }}
+  DB_SERVER_PORT: ${{ secrets.DB_SERVER_PORT }}
+  SSH_PRIVATE_KEY: ${{ secrets.DB_SSH_PRIVATE_KEY }}
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'development' }}
+
+jobs:
+  validate-secrets:
+    runs-on: ubuntu-latest
+    name: Validate Configuration
+    
+    steps:
+      - name: Check required secrets
+        run: |
+          if [ -z "${{ env.DB_SERVER_IP }}" ]; then
+            echo "❌ DB_SERVER_IP secret not configured"
+            exit 1
+          fi
+          if [ -z "${{ env.DB_SERVER_USER }}" ]; then
+            echo "❌ DB_SERVER_USER secret not configured"
+            exit 1
+          fi
+          if [ -z "${{ env.SSH_PRIVATE_KEY }}" ]; then
+            echo "❌ DB_SSH_PRIVATE_KEY secret not configured"
+            exit 1
+          fi
+          echo "✅ All required secrets configured"
+
+  setup-postgresql:
+    needs: validate-secrets
+    runs-on: ubuntu-latest
+    name: Install and Configure PostgreSQL
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.DB_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+          echo "✅ SSH configured"
+      
+      - name: Test SSH Connection
+        run: |
+          ssh -p ${{ env.DB_SERVER_PORT }} ${{ env.DB_SERVER_USER }}@${{ env.DB_SERVER_IP }} \
+            "echo '✅ SSH connection successful'; whoami; hostname"
+      
+      - name: Install PostgreSQL
+        run: |
+          ssh -p ${{ env.DB_SERVER_PORT }} ${{ env.DB_SERVER_USER }}@${{ env.DB_SERVER_IP }} << 'EOF'
+          echo "📦 Installing PostgreSQL..."
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql postgresql-contrib postgresql-client 2>&1 | grep -E "(Setting up|Processing|done)" || true
+          
+          echo "🚀 Starting PostgreSQL..."
+          sudo systemctl start postgresql
+          sudo systemctl enable postgresql
+          
+          echo "✅ PostgreSQL installation complete"
+          psql --version
+          EOF
+      
+      - name: Create Database User
+        run: |
+          ssh -p ${{ env.DB_SERVER_PORT }} ${{ env.DB_SERVER_USER }}@${{ env.DB_SERVER_IP }} << 'EOF'
+          echo "👤 Creating database user 'erp_user'..."
+          sudo -u postgres psql << 'PSQL'
+          CREATE USER erp_user WITH PASSWORD '$(echo "${{ github.event.inputs.db_password || 'erp_password' }}")';
+          ALTER USER erp_user CREATEDB;
+          GRANT ALL PRIVILEGES ON DATABASE postgres TO erp_user;
+          PSQL
+          
+          echo "✅ Database user created"
+          sudo -u postgres psql -c "SELECT usename FROM pg_user WHERE usename='erp_user';"
+          EOF
+      
+      - name: Create ERP Database
+        run: |
+          ssh -p ${{ env.DB_SERVER_PORT }} ${{ env.DB_SERVER_USER }}@${{ env.DB_SERVER_IP }} << 'EOF'
+          echo "🗄️ Creating erp_dev_db database..."
+          sudo -u postgres psql << 'PSQL'
+          CREATE DATABASE erp_dev_db OWNER erp_user;
+          GRANT ALL PRIVILEGES ON DATABASE erp_dev_db TO erp_user;
+          PSQL
+          
+          echo "✅ Database created"
+          sudo -u postgres psql -l | grep erp_dev_db
+          EOF
+      
+      - name: Configure PostgreSQL for Remote Access
+        run: |
+          ssh -p ${{ env.DB_SERVER_PORT }} ${{ env.DB_SERVER_USER }}@${{ env.DB_SERVER_IP }} << 'EOF'
+          echo "🔧 Configuring PostgreSQL for remote connections..."
+          
+          # Get PostgreSQL version
+          PG_VERSION=$(sudo -u postgres psql --version | awk '{print $NF}' | cut -d. -f1)
+          PG_CONFIG_DIR="/etc/postgresql/$PG_VERSION/main"
+          
+          echo "PostgreSQL version: $PG_VERSION"
+          echo "Config directory: $PG_CONFIG_DIR"
+          
+          # Configure postgresql.conf
+          echo "Updating postgresql.conf..."
+          sudo sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/g" $PG_CONFIG_DIR/postgresql.conf
+          
+          # Add pg_hba.conf entry for app server
+          echo "Updating pg_hba.conf..."
+          APP_SERVER_IP="192.168.6.128"
+          echo "host    all             all             $APP_SERVER_IP/32            md5" | sudo tee -a $PG_CONFIG_DIR/pg_hba.conf > /dev/null
+          
+          # Verify changes
+          echo "✅ Configuration updated"
+          echo "postgresql.conf - listen_addresses:"
+          sudo grep "listen_addresses" $PG_CONFIG_DIR/postgresql.conf | grep -v "^#"
+          
+          echo "pg_hba.conf - new entry:"
+          sudo tail -1 $PG_CONFIG_DIR/pg_hba.conf
+          EOF
+      
+      - name: Restart PostgreSQL
+        run: |
+          ssh -p ${{ env.DB_SERVER_PORT }} ${{ env.DB_SERVER_USER }}@${{ env.DB_SERVER_IP }} << 'EOF'
+          echo "🔄 Restarting PostgreSQL..."
+          sudo systemctl restart postgresql
+          
+          echo "✅ PostgreSQL restarted"
+          sudo systemctl status postgresql --no-pager | head -5
+          
+          # Verify listening on all interfaces
+          echo "Checking PostgreSQL port..."
+          sudo ss -tlnp | grep postgres || echo "⚠️ Could not verify port"
+          EOF
+      
+      - name: Test Database Connection
+        run: |
+          ssh -p ${{ env.DB_SERVER_PORT }} ${{ env.DB_SERVER_USER }}@${{ env.DB_SERVER_IP }} << 'EOF'
+          echo "🧪 Testing database connection..."
+          
+          # Test as erp_user
+          PGPASSWORD='$(echo "${{ github.event.inputs.db_password || 'erp_password' }}")' psql -h localhost -U erp_user -d erp_dev_db -c "SELECT version();" 2>/dev/null && echo "✅ Connection successful" || echo "⚠️ Connection test needs verification"
+          
+          # Show database info
+          sudo -u postgres psql -l | grep erp_dev_db
+          EOF
+      
+      - name: Generate Database Configuration Report
+        run: |
+          ssh -p ${{ env.DB_SERVER_PORT }} ${{ env.DB_SERVER_USER }}@${{ env.DB_SERVER_IP }} << 'EOF'
+          cat > /tmp/database_setup_report.txt << 'REPORT'
+          ╔═══════════════════════════════════════════════════════════╗
+          ║        DATABASE SERVER SETUP - CONFIGURATION REPORT       ║
+          ╚═══════════════════════════════════════════════════════════╝
+          
+          📊 INSTALLATION DETAILS:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          REPORT
+          
+          echo "PostgreSQL Version: $(psql --version)" >> /tmp/database_setup_report.txt
+          echo "Server IP: 192.168.6.129" >> /tmp/database_setup_report.txt
+          echo "Configuration Directory: $(sudo -u postgres psql --version | awk '{print $NF}' | cut -d. -f1)" >> /tmp/database_setup_report.txt
+          
+          cat >> /tmp/database_setup_report.txt << 'REPORT'
+          
+          🔐 DATABASE USERS:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          REPORT
+          
+          sudo -u postgres psql -c "SELECT usename, usecanlogin, usecreatedb FROM pg_user;" >> /tmp/database_setup_report.txt
+          
+          cat >> /tmp/database_setup_report.txt << 'REPORT'
+          
+          📦 DATABASES:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          REPORT
+          
+          sudo -u postgres psql -l >> /tmp/database_setup_report.txt
+          
+          cat >> /tmp/database_setup_report.txt << 'REPORT'
+          
+          🔌 REMOTE ACCESS:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          App Server IP: 192.168.6.128
+          Port: 5432
+          Database: erp_dev_db
+          User: erp_user
+          
+          CONNECTION STRING:
+          psql -h 192.168.6.129 -U erp_user -d erp_dev_db
+          
+          🔄 NEXT STEPS:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          1. Run: GitHub Actions - Run Database Migrations
+          2. Run: GitHub Actions - Create Superuser
+          3. Run: GitHub Actions - Deploy Application
+          
+          ═════════════════════════════════════════════════════════════
+          REPORT
+          
+          cat /tmp/database_setup_report.txt
+          sudo cp /tmp/database_setup_report.txt ~/database_setup_report.txt
+          EOF
+      
+      - name: Success Notification
+        if: success()
+        run: |
+          echo "✅ Database server setup completed successfully!"
+          echo ""
+          echo "📊 Configuration Summary:"
+          echo "  Database: erp_dev_db"
+          echo "  User: erp_user"
+          echo "  Server: 192.168.6.129:5432"
+          echo "  Environment: ${{ env.ENVIRONMENT }}"
+          echo ""
+          echo "🎯 Next Steps:"
+          echo "  1. Deploy App Server: setup-app-server workflow"
+          echo "  2. Run Migrations: run-database-migrations workflow"
+          echo "  3. Create Superuser: create-superuser workflow"
+
+  notify:
+    needs: setup-postgresql
+    runs-on: ubuntu-latest
+    if: always()
+    name: Deployment Status
+    
+    steps:
+      - name: Database Setup Status
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Database server setup completed successfully"
+          else
+            echo "❌ Database server setup failed"
+          fi

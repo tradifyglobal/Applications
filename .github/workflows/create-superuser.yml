@@ -1,0 +1,291 @@
+name: Create Django Superuser
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      username:
+        description: 'Superuser username'
+        required: true
+        type: string
+        default: 'admin'
+      email:
+        description: 'Superuser email'
+        required: true
+        type: string
+        default: 'admin@example.com'
+      password:
+        description: 'Superuser password (will be changed after login)'
+        required: false
+        type: string
+
+env:
+  APP_SERVER_IP: ${{ secrets.DEV_APP_SERVER_IP }}
+  APP_SERVER_USER: ${{ secrets.DEV_APP_SERVER_USER }}
+  APP_SERVER_PORT: ${{ secrets.DEV_APP_SERVER_PORT }}
+  SSH_PRIVATE_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'development' }}
+
+jobs:
+  validate-config:
+    runs-on: ubuntu-latest
+    name: Validate Configuration
+    
+    steps:
+      - name: Validate inputs
+        run: |
+          if [ -z "${{ github.event.inputs.username }}" ]; then
+            echo "❌ Username is required"
+            exit 1
+          fi
+          if [ -z "${{ github.event.inputs.email }}" ]; then
+            echo "❌ Email is required"
+            exit 1
+          fi
+          
+          # Validate email format
+          if ! [[ "${{ github.event.inputs.email }}" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+            echo "❌ Invalid email format"
+            exit 1
+          fi
+          
+          echo "✅ Input validation passed"
+      
+      - name: Check required secrets
+        run: |
+          if [ -z "${{ env.APP_SERVER_IP }}" ]; then
+            echo "❌ DEV_APP_SERVER_IP secret not configured"
+            exit 1
+          fi
+          if [ -z "${{ env.APP_SERVER_USER }}" ]; then
+            echo "❌ DEV_APP_SERVER_USER secret not configured"
+            exit 1
+          fi
+          if [ -z "${{ env.SSH_PRIVATE_KEY }}" ]; then
+            echo "❌ DEV_SSH_PRIVATE_KEY secret not configured"
+            exit 1
+          fi
+          echo "✅ All required secrets configured"
+
+  create-superuser:
+    needs: validate-config
+    runs-on: ubuntu-latest
+    name: Create Superuser
+    
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+          echo "✅ SSH configured"
+      
+      - name: Test SSH Connection
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} \
+            "echo '✅ SSH connection successful'; whoami"
+      
+      - name: Check Django installation
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} << 'EOF'
+          echo "🔍 Checking Django installation..."
+          
+          # Find manage.py
+          if [ -f "manage.py" ]; then
+            echo "✅ manage.py found in current directory"
+            pwd
+          elif [ -f "/opt/erp/manage.py" ]; then
+            echo "✅ manage.py found in /opt/erp"
+          elif [ -f "/home/zubair/erp/manage.py" ]; then
+            echo "✅ manage.py found in /home/zubair/erp"
+          else
+            echo "⚠️ manage.py not found - checking common locations..."
+            find ~ -name "manage.py" 2>/dev/null || echo "Could not locate manage.py"
+          fi
+          
+          # Check Python
+          python3 --version
+          EOF
+      
+      - name: Detect Django project path
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} << 'EOF'
+          echo "🔍 Detecting Django project path..."
+          
+          # Try to find manage.py
+          if [ -f "manage.py" ]; then
+            PROJECT_DIR=$(pwd)
+          elif [ -f "/opt/erp/manage.py" ]; then
+            PROJECT_DIR="/opt/erp"
+          elif [ -f "/home/zubair/erp/manage.py" ]; then
+            PROJECT_DIR="/home/zubair/erp"
+          else
+            PROJECT_DIR=$(find ~ -name "manage.py" -type f 2>/dev/null | head -1 | xargs dirname)
+          fi
+          
+          echo "Project directory: $PROJECT_DIR"
+          
+          # Create a temporary script to set the path
+          echo "export PROJECT_DIR='$PROJECT_DIR'" > ~/.project_path.sh
+          EOF
+      
+      - name: Create superuser script
+        run: |
+          cat > /tmp/create_superuser.py << 'PYEOF'
+          import os
+          import sys
+          import django
+          
+          # Setup Django
+          os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'core.settings')
+          django.setup()
+          
+          from django.contrib.auth.models import User
+          
+          username = "${{ github.event.inputs.username }}"
+          email = "${{ github.event.inputs.email }}"
+          password = "${{ github.event.inputs.password }}" or "temppassword123"
+          
+          try:
+              # Check if user exists
+              if User.objects.filter(username=username).exists():
+                  print(f"⚠️ User '{username}' already exists")
+                  user = User.objects.get(username=username)
+                  # Update email and password
+                  user.email = email
+                  user.set_password(password)
+                  user.save()
+                  print(f"✅ Updated existing user '{username}'")
+              else:
+                  # Create new superuser
+                  user = User.objects.create_superuser(username, email, password)
+                  print(f"✅ Superuser '{username}' created successfully")
+              
+              print(f"📧 Email: {user.email}")
+              print(f"🔐 Password: {'*' * len(password)}")
+              print(f"✨ Is Superuser: {user.is_superuser}")
+              
+          except Exception as e:
+              print(f"❌ Error creating superuser: {str(e)}")
+              sys.exit(1)
+          PYEOF
+          
+          cat > /tmp/run_superuser_creation.sh << 'SHEOF'
+          #!/bin/bash
+          set -e
+          
+          # Source project path
+          source ~/.project_path.sh 2>/dev/null || true
+          
+          PROJECT_DIR=${PROJECT_DIR:-.}
+          
+          echo "📂 Working directory: $PROJECT_DIR"
+          cd "$PROJECT_DIR"
+          
+          # Detect virtual environment
+          if [ -d "venv" ]; then
+              echo "🐍 Activating virtual environment..."
+              source venv/bin/activate
+          elif [ -d ".venv" ]; then
+              source .venv/bin/activate
+          else
+              echo "⚠️ No virtual environment found, using system Python"
+          fi
+          
+          # Set environment
+          export ENVIRONMENT=${{ env.ENVIRONMENT }}
+          
+          # Run the superuser creation script
+          python3 /tmp/create_superuser.py
+          SHEOF
+          
+          chmod +x /tmp/run_superuser_creation.sh
+      
+      - name: Upload and execute superuser script
+        run: |
+          echo "📤 Transferring scripts to app server..."
+          scp -P ${{ env.APP_SERVER_PORT }} \
+            /tmp/create_superuser.py \
+            /tmp/run_superuser_creation.sh \
+            ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }}:/tmp/
+          
+          echo "🔄 Executing superuser creation..."
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} << 'EOF'
+          bash /tmp/run_superuser_creation.sh
+          EOF
+
+  verify-superuser:
+    needs: create-superuser
+    runs-on: ubuntu-latest
+    name: Verify Superuser Creation
+    
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.DEV_APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+      
+      - name: Verify superuser in database
+        run: |
+          ssh -p ${{ secrets.DEV_APP_SERVER_PORT }} ${{ secrets.DEV_APP_SERVER_USER }}@${{ secrets.DEV_APP_SERVER_IP }} << 'EOF'
+          echo "🔍 Verifying superuser creation..."
+          
+          # Create verification script
+          python3 << 'VERIFY'
+          import os
+          import django
+          
+          os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'core.settings')
+          django.setup()
+          
+          from django.contrib.auth.models import User
+          
+          superusers = User.objects.filter(is_superuser=True)
+          
+          if superusers.exists():
+              print("✅ Superuser(s) found:")
+              for user in superusers:
+                  print(f"  👤 {user.username}")
+                  print(f"     📧 {user.email}")
+                  print(f"     ✨ Is Active: {user.is_active}")
+              print(f"\nTotal superusers: {superusers.count()}")
+          else:
+              print("⚠️ No superusers found")
+          VERIFY
+          EOF
+
+  notify-completion:
+    needs: verify-superuser
+    runs-on: ubuntu-latest
+    if: always()
+    name: Notify Completion
+    
+    steps:
+      - name: Superuser Creation Status
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Superuser created successfully"
+            echo ""
+            echo "👤 Username: ${{ github.event.inputs.username }}"
+            echo "📧 Email: ${{ github.event.inputs.email }}"
+            echo "🌍 Environment: ${{ env.ENVIRONMENT }}"
+            echo ""
+            echo "🎯 Next Steps:"
+            echo "  1. Access Django Admin: http://your-server/admin"
+            echo "  2. Use the credentials provided above"
+            echo "  3. Create additional users as needed"
+          else
+            echo "❌ Superuser creation failed"
+            echo "Please check the logs above for details"
+          fi

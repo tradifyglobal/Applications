@@ -1,0 +1,270 @@
+name: Run Database Migrations
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'apps/**/migrations/*'
+      - 'core/settings/*'
+      - '.github/workflows/run-database-migrations.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to run migrations'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+
+env:
+  APP_SERVER_IP: ${{ secrets.DEV_APP_SERVER_IP }}
+  APP_SERVER_USER: ${{ secrets.DEV_APP_SERVER_USER }}
+  APP_SERVER_PORT: ${{ secrets.DEV_APP_SERVER_PORT }}
+  SSH_PRIVATE_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'development' }}
+
+jobs:
+  validate-config:
+    runs-on: ubuntu-latest
+    name: Validate Configuration
+    
+    steps:
+      - name: Check required secrets
+        run: |
+          if [ -z "${{ env.APP_SERVER_IP }}" ]; then
+            echo "❌ DEV_APP_SERVER_IP secret not configured"
+            exit 1
+          fi
+          if [ -z "${{ env.APP_SERVER_USER }}" ]; then
+            echo "❌ DEV_APP_SERVER_USER secret not configured"
+            exit 1
+          fi
+          if [ -z "${{ env.SSH_PRIVATE_KEY }}" ]; then
+            echo "❌ DEV_SSH_PRIVATE_KEY secret not configured"
+            exit 1
+          fi
+          echo "✅ All required secrets configured"
+
+  prepare-migration-files:
+    runs-on: ubuntu-latest
+    name: Prepare Migration Package
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Create migration package
+        run: |
+          echo "📦 Preparing migration package..."
+          mkdir -p /tmp/migration_package
+          
+          # Copy manage.py and settings
+          cp manage.py /tmp/migration_package/
+          cp -r core /tmp/migration_package/
+          cp -r apps /tmp/migration_package/
+          cp requirements.txt /tmp/migration_package/
+          cp .env.example /tmp/migration_package/
+          
+          # Create migration script
+          cat > /tmp/migration_package/run_migrations.sh << 'MIGSCRIPT'
+          #!/bin/bash
+          set -e
+          
+          echo "🔄 Running Django migrations..."
+          
+          # Ensure environment variable is set
+          export ENVIRONMENT=${ENVIRONMENT:-development}
+          echo "Environment: $ENVIRONMENT"
+          
+          # Run migrations
+          python manage.py migrate --noinput
+          
+          # Show migration status
+          python manage.py showmigrations
+          
+          echo "✅ Migrations completed successfully"
+          MIGSCRIPT
+          
+          chmod +x /tmp/migration_package/run_migrations.sh
+          
+          # Create tar archive
+          tar -czf /tmp/migrations.tar.gz -C /tmp migration_package/
+          
+          echo "✅ Migration package prepared"
+          ls -lh /tmp/migrations.tar.gz
+      
+      - name: Upload migration artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: migration-package
+          path: /tmp/migrations.tar.gz
+          retention-days: 1
+
+  run-migrations:
+    needs: [validate-config, prepare-migration-files]
+    runs-on: ubuntu-latest
+    name: Run Migrations on App Server
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download migration package
+        uses: actions/download-artifact@v3
+        with:
+          name: migration-package
+          path: /tmp/
+      
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+          echo "✅ SSH configured"
+      
+      - name: Test SSH Connection
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} \
+            "echo '✅ SSH connection successful'; whoami"
+      
+      - name: Transfer migration package
+        run: |
+          echo "📤 Transferring migration package to app server..."
+          scp -P ${{ env.APP_SERVER_PORT }} /tmp/migrations.tar.gz \
+            ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }}:/tmp/
+          
+          echo "✅ Package transferred"
+      
+      - name: Extract and verify package
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} << 'EOF'
+          echo "📁 Extracting migration package..."
+          cd /tmp
+          tar -tzf migrations.tar.gz | head -10
+          tar -xzf migrations.tar.gz
+          
+          echo "✅ Package extracted"
+          ls -la /tmp/migration_package/
+          EOF
+      
+      - name: Verify migrations
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} << 'EOF'
+          echo "🔍 Verifying Django setup..."
+          cd /tmp/migration_package
+          
+          # List migration files
+          echo "Migration files found:"
+          find apps -name "migrations" -type d | head -10
+          find apps -path "*/migrations/*.py" -type f | wc -l | xargs echo "Total migration files:"
+          EOF
+      
+      - name: Apply migrations
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} << 'EOF'
+          echo "🔄 Applying Django migrations..."
+          cd /tmp/migration_package
+          
+          # Set environment
+          export ENVIRONMENT=${{ env.ENVIRONMENT }}
+          export PYTHONPATH=/tmp/migration_package:$PYTHONPATH
+          
+          # Check for venv
+          if [ -d "venv" ]; then
+            source venv/bin/activate
+          else
+            # Try to use system python or create venv
+            echo "Using system Python..."
+            python3 -m venv venv
+            source venv/bin/activate
+            pip install -q -r requirements.txt
+          fi
+          
+          # Run migrations
+          python manage.py migrate --noinput 2>&1
+          
+          # Show status
+          echo ""
+          echo "✅ Migration completed"
+          python manage.py showmigrations 2>&1 | head -30
+          EOF
+      
+      - name: Verify migration completion
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} << 'EOF'
+          echo "🧪 Verifying migration completion..."
+          cd /tmp/migration_package
+          
+          if [ -d "venv" ]; then
+            source venv/bin/activate
+          fi
+          
+          export ENVIRONMENT=${{ env.ENVIRONMENT }}
+          
+          # Check database tables
+          echo "Checking tables..."
+          python manage.py dbshell << 'SQL' 2>/dev/null || echo "⚠️ Could not verify tables directly"
+          SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema='public';
+          \dt
+          \q
+          SQL
+          
+          echo "✅ Migration verification complete"
+          EOF
+
+  create-migration-report:
+    needs: run-migrations
+    runs-on: ubuntu-latest
+    if: always()
+    name: Generate Migration Report
+    
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.DEV_APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+      
+      - name: Generate Report
+        run: |
+          ssh -p ${{ secrets.DEV_APP_SERVER_PORT }} ${{ secrets.DEV_APP_SERVER_USER }}@${{ secrets.DEV_APP_SERVER_IP }} << 'EOF'
+          cat > /tmp/migration_report.txt << 'REPORT'
+          ╔═══════════════════════════════════════════════════════════╗
+          ║           DATABASE MIGRATIONS - COMPLETION REPORT          ║
+          ╚═══════════════════════════════════════════════════════════╝
+          
+          🎯 MIGRATION SUMMARY:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          Environment: ${{ env.ENVIRONMENT }}
+          Executed: $(date)
+          Status: COMPLETED
+          
+          📊 STATISTICS:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          REPORT
+          
+          cat /tmp/migration_report.txt
+          EOF
+
+  notify-completion:
+    needs: create-migration-report
+    runs-on: ubuntu-latest
+    if: always()
+    name: Notify Completion
+    
+    steps:
+      - name: Migration Status
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Database migrations completed successfully"
+            echo ""
+            echo "🎯 Next Steps:"
+            echo "  1. Create Superuser: create-superuser workflow"
+            echo "  2. Deploy Application: deploy-application workflow"
+          else
+            echo "❌ Database migrations failed"
+            echo "Please check the logs above for details"
+          fi

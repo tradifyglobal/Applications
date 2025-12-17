@@ -1,0 +1,417 @@
+name: Full Application Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      deploy_database:
+        description: 'Setup/reset database server'
+        required: false
+        type: boolean
+        default: false
+      run_migrations:
+        description: 'Run database migrations'
+        required: true
+        type: boolean
+        default: true
+      create_superuser:
+        description: 'Create admin superuser'
+        required: false
+        type: boolean
+        default: false
+      deploy_app:
+        description: 'Deploy app server'
+        required: true
+        type: boolean
+        default: true
+
+env:
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'development' }}
+
+jobs:
+  deployment-plan:
+    runs-on: ubuntu-latest
+    name: Deployment Plan
+    
+    steps:
+      - name: Show deployment plan
+        run: |
+          cat << 'EOF'
+          ╔═══════════════════════════════════════════════════════════╗
+          ║          FULL APPLICATION DEPLOYMENT ORCHESTRATION        ║
+          ╚═══════════════════════════════════════════════════════════╝
+          
+          🎯 DEPLOYMENT PLAN:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          Environment: ${{ env.ENVIRONMENT }}
+          Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          
+          📋 PLANNED STEPS:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          EOF
+          
+          if [ "${{ github.event.inputs.deploy_database }}" == "true" ]; then
+            echo "  ☑️ 1. Setup Database Server (PostgreSQL)"
+          else
+            echo "  ☐ 1. Setup Database Server (PostgreSQL) - SKIPPED"
+          fi
+          
+          if [ "${{ github.event.inputs.run_migrations }}" == "true" ]; then
+            echo "  ☑️ 2. Run Database Migrations"
+          else
+            echo "  ☐ 2. Run Database Migrations - SKIPPED"
+          fi
+          
+          if [ "${{ github.event.inputs.create_superuser }}" == "true" ]; then
+            echo "  ☑️ 3. Create Django Superuser"
+          else
+            echo "  ☐ 3. Create Django Superuser - SKIPPED"
+          fi
+          
+          if [ "${{ github.event.inputs.deploy_app }}" == "true" ]; then
+            echo "  ☑️ 4. Deploy Application Server"
+          else
+            echo "  ☐ 4. Deploy Application Server - SKIPPED"
+          fi
+          
+          echo ""
+          echo "🔐 SECURITY CHECKS:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          if [ -z "${{ secrets.DEV_SSH_PRIVATE_KEY }}" ]; then
+            echo "  ❌ DEV_SSH_PRIVATE_KEY not configured"
+          else
+            echo "  ✅ SSH credentials configured"
+          fi
+          
+          if [ -z "${{ secrets.DB_SSH_PRIVATE_KEY }}" ]; then
+            echo "  ❌ DB_SSH_PRIVATE_KEY not configured"
+          else
+            echo "  ✅ Database SSH credentials configured"
+          fi
+          
+          echo ""
+          echo "⏱️ ESTIMATED DURATION:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Database Setup: ~5 minutes"
+          echo "  Migrations: ~2 minutes"
+          echo "  App Deploy: ~10 minutes"
+          echo "  ───────────────────────"
+          echo "  TOTAL: ~15-20 minutes (depends on options)"
+
+  setup-database:
+    if: github.event.inputs.deploy_database == 'true'
+    runs-on: ubuntu-latest
+    name: Step 1 - Setup Database Server
+    
+    env:
+      DB_SERVER_IP: ${{ secrets.DB_SERVER_IP }}
+      DB_SERVER_USER: ${{ secrets.DB_SERVER_USER }}
+      DB_SERVER_PORT: ${{ secrets.DB_SERVER_PORT }}
+      SSH_PRIVATE_KEY: ${{ secrets.DB_SSH_PRIVATE_KEY }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.DB_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+          echo "✅ SSH configured"
+      
+      - name: Install PostgreSQL on Database Server
+        run: |
+          ssh -p ${{ env.DB_SERVER_PORT }} ${{ env.DB_SERVER_USER }}@${{ env.DB_SERVER_IP }} << 'EOF'
+          echo "📦 Installing PostgreSQL on database server..."
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql postgresql-contrib postgresql-client 2>&1 | tail -5
+          sudo systemctl start postgresql
+          sudo systemctl enable postgresql
+          echo "✅ PostgreSQL installed and running"
+          EOF
+
+  run-migrations:
+    if: github.event.inputs.run_migrations == 'true'
+    needs: [deployment-plan]
+    runs-on: ubuntu-latest
+    name: Step 2 - Run Migrations
+    
+    env:
+      APP_SERVER_IP: ${{ secrets.DEV_APP_SERVER_IP }}
+      APP_SERVER_USER: ${{ secrets.DEV_APP_SERVER_USER }}
+      APP_SERVER_PORT: ${{ secrets.DEV_APP_SERVER_PORT }}
+      SSH_PRIVATE_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+          echo "✅ SSH configured"
+      
+      - name: Run Django Migrations
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} << 'EOF'
+          echo "🔄 Running database migrations..."
+          
+          if [ -f "manage.py" ]; then
+            export ENVIRONMENT=${{ env.ENVIRONMENT }}
+            python manage.py migrate --noinput
+            echo "✅ Migrations completed"
+          else
+            echo "⚠️ manage.py not found"
+          fi
+          EOF
+
+  create-admin:
+    if: github.event.inputs.create_superuser == 'true'
+    needs: [run-migrations]
+    runs-on: ubuntu-latest
+    name: Step 3 - Create Superuser
+    
+    env:
+      APP_SERVER_IP: ${{ secrets.DEV_APP_SERVER_IP }}
+      APP_SERVER_USER: ${{ secrets.DEV_APP_SERVER_USER }}
+      APP_SERVER_PORT: ${{ secrets.DEV_APP_SERVER_PORT }}
+      SSH_PRIVATE_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+      
+      - name: Create Django Superuser
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} << 'EOF'
+          echo "👤 Creating Django superuser..."
+          
+          export ENVIRONMENT=${{ env.ENVIRONMENT }}
+          
+          python manage.py shell << 'PYEOF'
+          from django.contrib.auth.models import User
+          if not User.objects.filter(username='admin').exists():
+              User.objects.create_superuser('admin', 'admin@company.com', 'admin123')
+              print("✅ Superuser 'admin' created")
+          else:
+              print("⚠️ Superuser 'admin' already exists")
+          PYEOF
+          EOF
+
+  deploy-app:
+    if: github.event.inputs.deploy_app == 'true'
+    needs: [deployment-plan]
+    runs-on: ubuntu-latest
+    name: Step 4 - Deploy Application Server
+    
+    env:
+      APP_SERVER_IP: ${{ secrets.DEV_APP_SERVER_IP }}
+      APP_SERVER_USER: ${{ secrets.DEV_APP_SERVER_USER }}
+      APP_SERVER_PORT: ${{ secrets.DEV_APP_SERVER_PORT }}
+      SSH_PRIVATE_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+      
+      - name: Deploy Application
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} << 'EOF'
+          echo "🚀 Deploying application..."
+          
+          # Pull latest code
+          if [ -d "erp" ]; then
+            cd erp
+            git pull origin main
+          else
+            git clone https://github.com/tradifyglobal/Applications.git erp
+            cd erp
+          fi
+          
+          # Update environment
+          export ENVIRONMENT=${{ env.ENVIRONMENT }}
+          
+          # Install dependencies
+          if [ -d "venv" ]; then
+            source venv/bin/activate
+          else
+            python3 -m venv venv
+            source venv/bin/activate
+          fi
+          
+          pip install -q -r requirements.txt
+          
+          # Collect static files
+          python manage.py collectstatic --noinput
+          
+          echo "✅ Application deployed"
+          EOF
+
+  deployment-summary:
+    needs: [deployment-plan, setup-database, run-migrations, create-admin, deploy-app]
+    runs-on: ubuntu-latest
+    if: always()
+    name: Deployment Summary
+    
+    steps:
+      - name: Generate summary
+        run: |
+          cat << 'EOF'
+          ╔═══════════════════════════════════════════════════════════╗
+          ║              DEPLOYMENT COMPLETION SUMMARY               ║
+          ╚═══════════════════════════════════════════════════════════╝
+          
+          🎯 DEPLOYMENT STATUS:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          Environment: ${{ env.ENVIRONMENT }}
+          Execution Duration: $(date)
+          
+          📊 RESULTS:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          EOF
+          
+          case "${{ job.status }}" in
+            "success")
+              echo "  ✅ Deployment completed successfully"
+              echo ""
+              echo "🚀 DEPLOYMENT COMPLETE"
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              ;;
+            "failure")
+              echo "  ❌ Deployment failed"
+              echo ""
+              echo "Please review the logs above for errors"
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              ;;
+            "cancelled")
+              echo "  ⚠️ Deployment cancelled"
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              ;;
+          esac
+          
+          echo ""
+          echo "📚 NEXT STEPS:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  1. Verify application accessibility"
+          echo "  2. Test API endpoints"
+          echo "  3. Monitor server logs"
+          echo "  4. Perform smoke tests"
+          echo ""
+          echo "📖 DOCUMENTATION:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  GitHub Actions Guide: docs/GITHUB_ACTIONS_DEPLOYMENT.md"
+          echo "  Troubleshooting: docs/DEPLOYMENT_SETUP_COMPLETE.md"
+          echo "  API Documentation: README/06-API_DOCUMENTATION.md"
+
+  post-deployment-checklist:
+    needs: deployment-summary
+    runs-on: ubuntu-latest
+    if: always()
+    name: Post-Deployment Checklist
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Create post-deployment checklist
+        run: |
+          cat > POST_DEPLOYMENT_CHECKLIST.md << 'EOF'
+          # Post-Deployment Checklist - ${{ env.ENVIRONMENT }}
+          
+          > Generated: $(date)
+          
+          ## 🔍 Health Checks
+          
+          - [ ] Application server is responding to HTTP requests
+          - [ ] HTTPS/SSL is working correctly
+          - [ ] Database connectivity verified
+          - [ ] All Django admin pages loading
+          - [ ] API endpoints responding correctly
+          - [ ] WebSocket connections established (if applicable)
+          - [ ] Background tasks/Celery working (if applicable)
+          
+          ## 📊 Database Verification
+          
+          - [ ] All migrations have been applied
+          - [ ] Database user has correct permissions
+          - [ ] Connection pooling is working
+          - [ ] Backup schedules are configured
+          - [ ] Database logs show no errors
+          
+          ## 🔐 Security Verification
+          
+          - [ ] HTTPS is enforced
+          - [ ] CSRF protection is enabled
+          - [ ] Security headers are present
+          - [ ] Debug mode is disabled (non-dev)
+          - [ ] Secrets are not exposed in logs
+          - [ ] API keys are rotated
+          - [ ] SSH key-based access verified
+          
+          ## 📈 Performance Baseline
+          
+          - [ ] Response time baseline established
+          - [ ] Load testing completed
+          - [ ] Cache is warmed up
+          - [ ] CDN is configured (if applicable)
+          - [ ] Static files are optimized
+          - [ ] Database query performance verified
+          
+          ## 📝 Documentation
+          
+          - [ ] Deployment notes added to runbook
+          - [ ] Configuration changes documented
+          - [ ] Troubleshooting steps updated
+          - [ ] Team notified of deployment
+          
+          ## 🔄 Rollback Plan
+          
+          - [ ] Previous version backed up
+          - [ ] Rollback procedure tested
+          - [ ] Team understands rollback process
+          - [ ] Rollback runbook is accessible
+          
+          ## ✅ Sign-Off
+          
+          - [ ] Deployment verified by team
+          - [ ] Stakeholders notified
+          - [ ] Incident response team on alert
+          - [ ] Monitoring alerts configured
+          EOF
+          
+          cat POST_DEPLOYMENT_CHECKLIST.md
+      
+      - name: Display completion message
+        run: |
+          echo "✅ Deployment workflow completed"
+          echo ""
+          echo "📋 Post-deployment checklist created: POST_DEPLOYMENT_CHECKLIST.md"
+          echo ""
+          echo "🎯 Next actions:"
+          echo "  1. Review the checklist above"
+          echo "  2. Perform manual verification tests"
+          echo "  3. Monitor application for issues"
+          echo "  4. Update documentation if needed"
