@@ -104,7 +104,9 @@ jobs:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          cat > ~/.ssh/id_rsa << 'EOF'
+          ${{ env.SSH_PRIVATE_KEY }}
+          EOF
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts
       

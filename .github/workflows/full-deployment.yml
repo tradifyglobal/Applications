@@ -124,7 +124,9 @@ jobs:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          cat > ~/.ssh/id_rsa << 'EOF'
+          ${{ env.SSH_PRIVATE_KEY }}
+          EOF
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.DB_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
           echo "✅ SSH configured"
@@ -158,7 +160,9 @@ jobs:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          cat > ~/.ssh/id_rsa << 'EOF'
+          ${{ env.SSH_PRIVATE_KEY }}
+          EOF
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
           echo "✅ SSH configured"
@@ -195,11 +199,11 @@ jobs:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          cat > ~/.ssh/id_rsa << 'EOF'
+          ${{ env.SSH_PRIVATE_KEY }}
+          EOF
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
-      
-      - name: Create Django Superuser
         run: |
           ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} << 'EOF'
           echo "👤 Creating Django superuser..."
@@ -234,7 +238,9 @@ jobs:
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          cat > ~/.ssh/id_rsa << 'EOF'
+          ${{ env.SSH_PRIVATE_KEY }}
+          EOF
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
       
