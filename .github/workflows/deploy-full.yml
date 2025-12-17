@@ -1,0 +1,151 @@
+name: Deploy All Modules
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'core/**'
+      - 'requirements.txt'
+  workflow_dispatch:
+
+env:
+  APP_SERVER_IP: ${{ secrets.APP_SERVER_IP }}
+  APP_SERVER_USER: ${{ secrets.APP_SERVER_USER }}
+  APP_SERVER_PORT: ${{ secrets.APP_SERVER_PORT }}
+  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Run All Tests
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: test_erp
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_pass
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-django pytest-cov
+      
+      - name: Run all tests
+        env:
+          DEBUG: False
+          SECRET_KEY: test-secret-key
+          DB_ENGINE: django.db.backends.postgresql
+          DB_NAME: test_erp
+          DB_USER: test_user
+          DB_PASSWORD: test_pass
+          DB_HOST: localhost
+          DB_PORT: 5432
+        run: |
+          pytest apps/ --cov=apps --cov-report=xml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    name: Build Full Application
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Build Docker image
+        run: |
+          docker build -t erp-app:latest .
+          docker build -t erp-app:${{ github.sha }} .
+          docker save erp-app:latest -o /tmp/docker-image-latest.tar
+          docker save erp-app:${{ github.sha }} -o /tmp/docker-image-sha.tar
+      
+      - name: Upload Docker image artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: docker-images
+          path: /tmp/docker-image-*.tar
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    name: Deploy to Production
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download Docker image artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: docker-images
+          path: /tmp
+      
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts
+      
+      - name: Deploy to App Server
+        run: |
+          # Load Docker images
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} \
+            "docker load -i /tmp/docker-image-latest.tar"
+          
+          # Copy deployment script
+          scp -P ${{ env.APP_SERVER_PORT }} scripts/deploy-full.sh \
+            ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }}:/tmp/
+          
+          # Run deployment
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} \
+            "bash /tmp/deploy-full.sh"
+      
+      - name: Run Database Migrations
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} \
+            "docker exec erp_app python manage.py migrate"
+      
+      - name: Health Check
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} \
+            "curl -s http://localhost:8000/admin/ | grep -q 'Django administration' && echo 'App is running'"
+
+  rollback:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: failure()
+    name: Rollback on Failure
+    
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts
+      
+      - name: Rollback Deployment
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} \
+            "docker compose down && docker compose up -d --remove-orphans"

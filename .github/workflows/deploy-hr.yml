@@ -1,0 +1,138 @@
+name: Deploy HR Module
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'apps/hr/**'
+      - 'core/**'
+      - 'requirements.txt'
+      - '.github/workflows/deploy-hr.yml'
+  workflow_dispatch:
+
+env:
+  APP_SERVER_IP: ${{ secrets.APP_SERVER_IP }}
+  APP_SERVER_USER: ${{ secrets.APP_SERVER_USER }}
+  APP_SERVER_PORT: ${{ secrets.APP_SERVER_PORT }}
+  DB_SERVER_IP: ${{ secrets.DB_SERVER_IP }}
+  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Test HR Module
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: test_erp
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_pass
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-django pytest-cov
+      
+      - name: Run tests
+        env:
+          DEBUG: False
+          SECRET_KEY: test-secret-key
+          DB_ENGINE: django.db.backends.postgresql
+          DB_NAME: test_erp
+          DB_USER: test_user
+          DB_PASSWORD: test_pass
+          DB_HOST: localhost
+          DB_PORT: 5432
+        run: |
+          pytest apps/hr/ --cov=apps.hr --cov-report=xml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    name: Build HR Module
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Build Docker image
+        run: |
+          docker build -t erp-app:hr-${{ github.sha }} .
+          docker save erp-app:hr-${{ github.sha }} -o /tmp/docker-image.tar
+      
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: docker-image-hr
+          path: /tmp/docker-image.tar
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    name: Deploy HR Module
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: docker-image-hr
+          path: /tmp
+      
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts
+      
+      - name: Deploy to App Server
+        run: |
+          # Load Docker image
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} \
+            "docker load -i /tmp/docker-image.tar"
+          
+          # Run deployment script
+          scp -P ${{ env.APP_SERVER_PORT }} scripts/deploy-module.sh \
+            ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }}:/tmp/
+          
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} \
+            "bash /tmp/deploy-module.sh hr ${{ github.sha }}"
+      
+      - name: Verify Deployment
+        run: |
+          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} \
+            "curl -s http://localhost:8000/api/hr/employees/ | jq '.count'"
+
+  notify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: always()
+    name: Notify Deployment Status
+    
+    steps:
+      - name: Deployment Status
+        run: |
+          echo "HR Module Deployment Status: ${{ needs.deploy.result }}"
