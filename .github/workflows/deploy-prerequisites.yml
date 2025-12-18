@@ -69,12 +69,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Debug - Check workspace
+      - name: Debug - Check workspace  
         run: |
+          echo "Current working directory:"
           pwd
+          echo ""
+          echo "Contents of workspace:"
           ls -la
-          ls -la secrets/ 2>/dev/null || echo "secrets folder not found"
-          find . -name "deploy_key" -type f 2>/dev/null || echo "deploy_key file not found"
+          echo ""
+          echo "Contents of secrets folder:"
+          ls -la secrets/ 2>/dev/null || echo "❌ secrets folder not found"
+          echo ""
+          echo "Looking for deploy_key:"
+          find . -name "deploy_key" -type f 2>/dev/null || echo "❌ deploy_key file not found anywhere"
       
       - name: Setup SSH
         run: |
