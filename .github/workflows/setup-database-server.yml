@@ -59,15 +59,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Setup SSH
+      - uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{ secrets.DB_SSH_PRIVATE_KEY }}
+      
+      - name: Add server to known_hosts
         run: |
-          mkdir -p ~/.ssh
-          cp ./secrets/deploy_key ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.DB_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
           echo "✅ SSH configured"
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.DB_SSH_PRIVATE_KEY }}
       
       - name: Test SSH Connection
         run: |

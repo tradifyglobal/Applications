@@ -101,14 +101,13 @@ jobs:
           name: docker-image-hr
           path: /tmp
       
-      - name: Setup SSH
+      - uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+      
+      - name: Add server to known_hosts
         run: |
-          mkdir -p ~/.ssh
-          cp ./secrets/deploy_key ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts
-        env:
-          SSH_PRIVATE_KEY: ${{ env.SSH_PRIVATE_KEY }}
       
       - name: Deploy to App Server
         run: |
