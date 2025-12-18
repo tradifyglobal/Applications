@@ -121,12 +121,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - uses: webfactory/ssh-agent@v0.7.0
-        with:
-          ssh-private-key: ${{ secrets.DB_SSH_PRIVATE_KEY }}
-      
-      - name: Add server to known_hosts
+      - name: Setup SSH Key
+        env:
+          SSH_KEY: ${{ secrets.DB_SSH_PRIVATE_KEY }}
         run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" | base64 -d > ~/.ssh/id_rsa 2>/dev/null || echo "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.DB_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
           echo "✅ SSH configured"
       
@@ -156,12 +157,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - uses: webfactory/ssh-agent@v0.7.0
-        with:
-          ssh-private-key: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
-      
-      - name: Add server to known_hosts
+      - name: Setup SSH Key
+        env:
+          SSH_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
         run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" | base64 -d > ~/.ssh/id_rsa 2>/dev/null || echo "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
           echo "✅ SSH configured"
       
@@ -194,12 +196,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - uses: webfactory/ssh-agent@v0.7.0
-        with:
-          ssh-private-key: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
-      
-      - name: Add server to known_hosts
+      - name: Setup SSH Key
+        env:
+          SSH_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
         run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" | base64 -d > ~/.ssh/id_rsa 2>/dev/null || echo "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
       
       - name: Create Superuser
@@ -234,12 +237,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - uses: webfactory/ssh-agent@v0.7.0
-        with:
-          ssh-private-key: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
-      
-      - name: Add server to known_hosts
+      - name: Setup SSH Key
+        env:
+          SSH_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
         run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" | base64 -d > ~/.ssh/id_rsa 2>/dev/null || echo "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
       
       - name: Deploy Application
