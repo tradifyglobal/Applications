@@ -95,7 +95,14 @@ jobs:
       
       - name: Test SSH Connection
         run: |
-          ssh -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} "whoami && hostname"
+          echo "Testing SSH connection to ${{ env.APP_SERVER_IP }}:${{ env.APP_SERVER_PORT }}"
+          echo "User: ${{ env.APP_SERVER_USER }}"
+          
+          # Test SSH connectivity with verbose output
+          ssh -v -p ${{ env.APP_SERVER_PORT }} ${{ env.APP_SERVER_USER }}@${{ env.APP_SERVER_IP }} "whoami && hostname" 2>&1 || {
+            echo "❌ SSH connection failed with exit code: $?"
+            exit 1
+          }
       
       - name: Copy requirements
         run: |
