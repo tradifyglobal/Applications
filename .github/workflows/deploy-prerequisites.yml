@@ -69,6 +69,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Debug - Check workspace
+        run: |
+          pwd
+          ls -la
+          ls -la secrets/ 2>/dev/null || echo "secrets folder not found"
+          find . -name "deploy_key" -type f 2>/dev/null || echo "deploy_key file not found"
+      
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
