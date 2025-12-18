@@ -101,6 +101,20 @@ jobs:
           
           echo "✅ SSH configured"
       
+      - name: Test Network Connectivity
+        run: |
+          echo "Testing network connectivity to ${{ env.APP_SERVER_IP }}:${{ env.APP_SERVER_PORT }}"
+          
+          # Test with nc (netcat) if available
+          if command -v nc &> /dev/null; then
+            echo "Testing with nc..."
+            nc -zv -w 5 ${{ env.APP_SERVER_IP }} ${{ env.APP_SERVER_PORT }} || echo "nc test failed"
+          fi
+          
+          # Test with timeout
+          echo "Testing SSH port with timeout..."
+          timeout 5 bash -c "echo >/dev/tcp/${{ env.APP_SERVER_IP }}/${{ env.APP_SERVER_PORT }}" && echo "✅ Port ${{ env.APP_SERVER_PORT }} is open" || echo "❌ Port ${{ env.APP_SERVER_PORT }} appears closed or unreachable"
+      
       - name: Test SSH Connection
         run: |
           echo "Testing SSH connection to ${{ env.APP_SERVER_IP }}:${{ env.APP_SERVER_PORT }}"
