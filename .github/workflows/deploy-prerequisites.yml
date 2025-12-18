@@ -68,10 +68,23 @@ jobs:
         env:
           SSH_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
         run: |
+          set -x  # Debug mode
           mkdir -p ~/.ssh
-          echo "$SSH_KEY" | base64 -d > ~/.ssh/id_rsa 2>/dev/null || echo "$SSH_KEY" > ~/.ssh/id_rsa
+          
+          # Try base64 decode first, fall back to plain text
+          if echo "$SSH_KEY" | base64 -d > ~/.ssh/id_rsa 2>/dev/null; then
+            echo "✅ SSH key written (base64 decoded)"
+          else
+            echo "$SSH_KEY" > ~/.ssh/id_rsa
+            echo "✅ SSH key written (plain text)"
+          fi
+          
+          # Verify key file
+          ls -la ~/.ssh/id_rsa
+          head -1 ~/.ssh/id_rsa
+          
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H ${{ env.APP_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null || echo "⚠️ ssh-keyscan warning"
           echo "✅ SSH configured"
       
       - name: Test SSH Connection
