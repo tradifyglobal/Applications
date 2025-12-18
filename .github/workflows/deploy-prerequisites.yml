@@ -64,6 +64,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Verify Secrets
+        env:
+          SSH_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+        run: |
+          echo "SSH_KEY length: ${#SSH_KEY} characters"
+          if [ ${#SSH_KEY} -gt 100 ]; then
+            echo "✅ SSH_KEY is present and has content"
+          else
+            echo "❌ SSH_KEY is empty or too short"
+            exit 1
+          fi
+      
       - name: Setup SSH Key
         env:
           SSH_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
