@@ -81,11 +81,11 @@ jobs:
           SSH_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.ssh
-          # Write SSH key directly without trying to decode
-          printf "%s" "$SSH_KEY" > ~/.ssh/id_rsa
+          # Decode base64 SSH key and write to file
+          echo "$SSH_KEY" | base64 -d > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           
-          # Verify the key
+          # Verify key
           echo "Key file size: $(wc -c < ~/.ssh/id_rsa) bytes"
           echo "Key starts with: $(head -c 50 ~/.ssh/id_rsa)"
           
